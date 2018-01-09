@@ -1,3 +1,20 @@
+#Implementation of an ETDRK4 solver to approximate solutions to the system of evolution equations
+#u_t = v - a*grad^2*u - grad^2grad^2*u + lamda*(grad u)^2
+#v_t = -v + b*grad^2*u - c*grad^2*v - d*grad^2grad^2*v + nu*v^2 + eta*v^3 + zeta*grad^2*v*3
+
+#The above equations model the response of a solid surface containing two elements as it
+#undergoes ion bombardment. The quantities u and v are perturbations from a flat, homogeneous steady state
+#in which the surface recedes at a constant velocity. The system is assumed to reach this steady state
+#if bombardment proceeds for a sufficiently long period of time. The variable u represents a perturbation
+#in the height of the surface from the steady state, while the variable v represents a perturbation in 
+#the concentration of the less preferentially sputtered species, that is, the element which is less
+#likely to be sputtered off of the surface due to bombardment.
+
+#A detailed account of the numerical method used can be found in the 2005 paper "Fourth Order Time
+#Stepping for Stiff PDE's", by Trefethen and Kassam. A description that agrees with the implementation
+#can by found in the "Numerical Methods" section of my master's thesis, which is included in this 
+#repository.
+
 from __future__ import division
 import numpy as np
 from numpy.fft import rfft2,irfft2
@@ -10,9 +27,7 @@ import time
 import sys
 import pdb
 
-#solves the system of evolution equations
-#u_t = v - a*grad^2*u - grad^2grad^2*u + lamda*(grad u)^2
-#v_t = -v + b*grad^2*u - c*grad^2*v - d*grad^2grad^2*v + nu*v^2 + eta*v^3 + zeta*grad^2*v*3
+
 
 def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
     
