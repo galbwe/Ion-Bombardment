@@ -1,6 +1,7 @@
 #Implementation of an ETDRK4 solver to approximate solutions to the system of evolution equations
 #u_t = v - a*grad^2*u - grad^2grad^2*u + lamda*(grad u)^2
 #v_t = -v + b*grad^2*u - c*grad^2*v - d*grad^2grad^2*v + nu*v^2 + eta*v^3 + zeta*grad^2*v*3
+#on a square domain with periodic boundary conditions.
 
 #The above equations model the response of a solid surface containing two elements as it
 #undergoes ion bombardment. The quantities u and v are perturbations from a flat, homogeneous steady state
@@ -10,10 +11,38 @@
 #the concentration of the less preferentially sputtered species, that is, the element which is less
 #likely to be sputtered off of the surface due to bombardment.
 
-#A detailed account of the numerical method used can be found in the 2005 paper "Fourth Order Time
+#A detailed account of the numerical method used can be found in the 2002 paper "Exponential Time Differencing
+#for Stiff Systems" by Cox and Matthews, or in the 2005 paper "Fourth Order Time
 #Stepping for Stiff PDE's", by Trefethen and Kassam. A description that agrees with the implementation
 #can by found in the "Numerical Methods" section of my master's thesis, which is included in this 
-#repository.
+#repository. The general idea behind the method is to solve the system of PDE's by transforming it
+#to a system of ODE's depending on a continuous parameter via the Fourier transform, then to discretize
+#this parameter and solve the finite dimensional system of ODE's that results. The finite dimensional system of 
+#ODE's is divided into a nonlinear part and a stiff linear part. An integrating factor is used to solve
+#for the stiff linear part directly, and then a direct time stepping scheme is used to update the approximation
+#to the nonlinear part. 
+
+#Arguments to solve_ps:
+# N : Number of grid points in the spatial domain in one dimension. That is, the system will by solved
+#    on an N by N square grid. 
+# Nfinal : Total number of time steps to use.
+# h : Length of each time step.
+# ckeep : Number of time steps that will not be saved in between those that are saved. Increase to 
+# reduce memory requirements of the output.
+# L : one half of the width of the square domain. That is, the system of PDE's is solved on a 2L by 2L square
+# a : Linear parameter which roughly controlled the strength of the Bradley Harper effect.
+# b : Linear parameter controlling the strength of momentum transfer from ions to surface atoms.
+# c : Linear parameter tied to the strength of phase separation.
+# d : Linear parameter controlling strength of linear stabilization of second equation.
+# lambda : Nonlinear parameter controlling effect of surface slope on surface height.
+# nu : Nonlinear parameter controlling strength of quadratic nonlinearity taken from Cahn-Hilliard equation.
+# eta : Nonlinear parameter controlling strength of cubic nonlinearity from Bradley-Shipman equations.
+# zeta : Nonlinear parameter controlling strength of cubic nonlinearity from Cahn-Hilliard equation.
+# filename : name of the file to which output will by written. A default filename will be created if one is not
+# provided
+
+#Output:
+# solve_ps does not return anything directly, but instead saves simulation data and the parameters used to a .npz file.
 
 from __future__ import division
 import numpy as np
@@ -26,8 +55,6 @@ import shutil
 import time
 import sys
 import pdb
-
-
 
 def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
     
@@ -53,21 +80,27 @@ def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
     ukeep[0,:,:] = u
     vkeep = np.empty((1 + int(Nfinal/ckeep),N,N))
     vkeep[0,:,:] = v
-    tkeep = h*np.arange(0,Nfinal+1,ckeep)
+    tkeep = h*np.arange(0,Nfinal+1,ckeep)# time steps to keep
+    # define an N by N grid of wavenumbers squared: ksq
     ky = np.pi/L*fftshift(np.arange(-N/2,N/2))
     kx = np.pi/L*np.arange(N/2+1)
     kxx,kyy = np.meshgrid(kx,ky)
     ksq = kxx**2 + kyy**2   
 
-    #Diagonal entries of the linear operators Lt and Lt/2 
-    Lu = h*(a*ksq - ksq**2) 
-    Lu2 = 0.5*Lu
-    Lv = h*(-1 + c*ksq-d*ksq**2)
-    Lv2 = 0.5*Lv
+    #Diagonal entries of the linear operators L*t and L*t/2 
+    Lu = h*(a*ksq - ksq**2) # upper left entry of L*t
+    Lu2 = 0.5*Lu # upper left entry of L*t/2
+    Lv = h*(-1 + c*ksq-d*ksq**2) # lower right entry of L*t
+    Lv2 = 0.5*Lv # lower right entry of L*t/2
+	
+    #Computes coefficients that will be used many times in ETDRK4 time stepping loop. 
+    #Coefficients are computed as contour integrals. Details of the computation are 
+    #contained in the function evaluate.
 
     M = 32#number of points to use in complex contour integral        
     t = np.linspace(0,np.pi,M)
-    rts = np.exp(1j*t)
+    rts = np.exp(1j*t)#roots of unity
+
     #computes f(L) using contour integral over circle of radius 1 centered at L 
     def evaluate(f,L):
         integrand = f(L.reshape((L.shape[0],L.shape[1],1)) + rts)
@@ -75,8 +108,10 @@ def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
  
     coeff_start = time.time()
 
-	#functions kappa, alpha, beta, and gamma are defined at bottom,
-	# and are taken from Trefethen, Kassam, 2005
+    #coefficients
+    #functions kappa, alpha, beta, and gamma are defined at bottom,
+    # and are taken from Trefethen, Kassam, 2005
+    # Also, see my master's thesis.
     kappa_u = evaluate(kappa,Lu2)
     kappa_v = evaluate(kappa,Lv2)
     alpha_u = evaluate(alpha,Lu)
@@ -89,7 +124,10 @@ def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
     coeff_end = time.time()
     coeff_time = coeff_end - coeff_start
     print 'Coefficients computed in %s seconds' % coeff_time   
-     
+    
+    #Computes numerical gradient of a function on a square with periodic boundary conditions
+    #Needed for the evaluation of the nonlinear part of the system of PDE's in the ETRK4
+    #time stepping loop.
     def periodic_gradient(u,dx):
         u_ext = np.zeros((u.shape[0]+4,u.shape[1]+4))
         u_ext[2:N+2,2:N+2] = u
@@ -106,7 +144,7 @@ def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
         ux = ux_ext[2:N+2,2:N+2]
         return uy,ux
 
-    def rhs(u,v): #Nonlinear parts of the original pde        
+    def rhs(u,v): #Nonlinear parts of the PDE's, considered in the spatial domain        
         uy,ux = periodic_gradient(u,2*L/N)
         v3 = v**3
         v3y,v3x = periodic_gradient(v3,2*L/N)
@@ -114,24 +152,24 @@ def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
         v3xy,v3xx = periodic_gradient(v3x,2*L/N)		
         return lamda*(ux**2 + uy**2), nu*v**2 + eta*v3 + zeta*(v3xx + v3yy)
 
-    #nonlinear operator on fourier space
-    #N_u(uhat,vhat) = fft(rhs_u(real(ifft(uhat,vhat)))) 
-        #N_v(uhat,vhat) = fft(rhs_v(real(ifft(uhat,vhat)))) - b*ksq*uhat
+    #Nonlinear part of the Fourier transformed PDE's, considered as an operator
+    #in the frequency domain.
     def nonlinear(uhat,vhat):
         u = irfft2(uhat)
         v = irfft2(vhat)
         u,v = rhs(u,v)
         return rfft2(u) + vhat,rfft2(v)-b*ksq*uhat    
     
-    #diagonal entries of matrix exponential exp(Lt) 
+    #diagonal entries of matrix exponential exp(Lt), used in ETDRK4 loop
     eu2 = np.exp(Lu2)
     eu = np.exp(Lu)
     ev2 = np.exp(Lv2)
     ev = np.exp(Lv)
-    #etdrk4 time stepping loop
 
+    #etdrk4 time stepping loop
     loop_start = time.time()
-    for n in range(1,Nfinal+1):       
+
+       for n in range(1,Nfinal+1):       
 
         Nu,Nv = nonlinear(uhat,vhat)
         #the multiplicative factor of 0.5*h is to account for the discrepancy in
@@ -152,6 +190,8 @@ def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
         uhat = rfft2(irfft2(eu*uhat + h*alpha_u*Nu + 2*h*beta_u*(Nau + Nbu) + h*gamma_u*Ncu))
         vhat = rfft2(irfft2(ev*vhat + h*alpha_v*Nv + 2*h*beta_v*(Nav + Nbv) + h*gamma_v*Ncv))
 
+	#check for NaN values in solution, indicating the solution has gone to infinity.
+	#If this is the case, terminate the computation.
         try:
             if np.isnan(uhat).any() or np.isnan(vhat).any():
                 raise ValueError('Solution Contains NaN') 
@@ -159,8 +199,8 @@ def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
             print(error.args)
             break
 
-        if int(n%ckeep) == 0:           
-
+	#store solution
+        if int(n%ckeep) == 0:  
             ukeep[int(n/ckeep),:,:] = irfft2(uhat)
             vkeep[int(n/ckeep),:,:] = irfft2(vhat)     
 
@@ -168,6 +208,7 @@ def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
     loop_time = loop_end-loop_start
     print 'ETDRK4 loop completed in %s seconds' % loop_time
 
+    #default filename if one is not provided as an argument
     if filename == None:
         filename = ('phase_sep_etdrk4_' + time.strftime('%m_%d_%Y_%H_%M') + '_a_' 
         	+ str(a) + '_b_' + str(b) + '_c_' + str(c) + '_d_' 
@@ -181,7 +222,7 @@ def solve_ps(N,Nfinal,h,ckeep,L,a,b,c,d,lamda,nu,eta,zeta,filename = None):
     	zeta = zeta, u = ukeep, v = vkeep, t = tkeep)
 
         
-#functions used to compute coefficients before the main loop
+#functions used to compute coefficients before the main ETRK4 loop
 
 def kappa(z):
     return (np.exp(z) - 1)/z
